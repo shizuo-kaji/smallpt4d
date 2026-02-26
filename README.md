@@ -2,33 +2,47 @@ smallpt4D: simple ray tracer for 4D scenes
 ==================
 * written by S. Kaji
 * Based on: smallpt: Global Illumination in 99 lines of C++ by Kevin Beason
-* Depends on: Eigen 3 (http://eigen.tuxfamily.org)
-             stb_image_write.h by Sean Barrett (included)
 
+# Build
 
+Requirements:
+* CMake 3.16+
+* A C++17 compiler
+* Eigen3 headers
+* OpenMP runtime
+* OpenCL runtime/SDK (optional, for GPU mode via `-g`)
+
+```bash
+cmake --build build --config Release
+```
 
 # Usage
 
-Edit main.cpp, especially around the end of the file to define a 4D scene.
+Edit `scene_definition.cpp` to define a 4D scene.
+Then,
 
-    > vi main.cpp
+```bash
+./build/smallpt4d
+```
 
-Compile with gcc by
+Command-line options:
 
-    > make
+```bash
+./build/smallpt4d [-m min_bounce] [-s samples] [-w width] [-h height] [-f frames] [-g]
+```
 
-You may want to limit the number of threads used for rendering with OpenMP by
+* `-m <int>`: minimum bounce count before Russian roulette (default: `5`)
+* `-s <int>`: samples per pixel (default: `100`)
+* `-w <int>`: output width in pixels (default: `1080`)
+* `-h <int>`: output height in pixels (default: `1200`)
+* `-f <int>`: number of frames (default: `200`)
+* `-g`: enable OpenCL GPU backend when available (sometimes quality degrades due to fp32 precision)
 
-    > export OMP_NUM_THREADS=8
+Combine rendered images into a side-by-side video for HMDs:
 
-Rendering takes hours!
+```bash
+python3 create_video.py
+```
 
-    > ./smallpt4d
-
-Combine rendered images into a Side-by-side video for HMDs.
-
-    > bash create-video.sh
-
-Play the produced video by a media player such as [Whirligig>http://www.whirligig.xyz/]
-(Press "Y" key to enter SBS mode in Whirligig)
-
+Play the produced video in a media player such as [Whirligig](http://www.whirligig.xyz/)
+(press `Y` to enter SBS mode in Whirligig).

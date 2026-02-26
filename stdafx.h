@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <random>
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <string>
+#include <vector>
 #include <stdio.h>
 #include <Eigen/Dense>
-

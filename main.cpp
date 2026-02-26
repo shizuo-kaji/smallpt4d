@@ -2,21 +2,21 @@
  smallpt4D: simple ray tracer for 4D scenes by Shizuo Kaji
  Based on: smallpt: Global Illumination in 99 lines of C++ by Kevin Beason
  Depends on: Eigen 3 (http://eigen.tuxfamily.org)
-             stb_image_write.h by Sean Barrett (included)
 */
 
 
 #include "stdafx.h"
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include "opencl_renderer.h"
+#include "png_writer.h"
+#include "progress_bar.h"
+#include "scene_definition.h"
 
 #if defined(_WIN32)|| defined(_WIN64)
 	#include "getopt_win.h"
 #else
 	#include <getopt.h>
 #endif
-#include <mutex>
+#include <limits>
 
 using namespace Eigen;
 
@@ -31,22 +31,39 @@ struct Configuration{
     int emitter_sampling_off = 1;   // set 0 to sample emitters
     std::string output="output.png";
     double env_map = 1;
+    bool use_gpu = false;
 };
 
 // random number generator
 class Sampling{
 public:
-    Sampling(int s): gen(s), zero_one(0,1){}
+    explicit Sampling(int s): gen(s), zero_one(0.0, 1.0){}
     double random_double() { return zero_one(gen); }
+    double random_signed() { return 2.0 * random_double() - 1.0; }
 private:
     std::mt19937 gen;
     std::uniform_real_distribution<> zero_one;
 };
 
+inline Vector4d random_unit_vector(Sampling& sampler) {
+    while (true) {
+        const Vector4d candidate(
+            sampler.random_signed(),
+            sampler.random_signed(),
+            sampler.random_signed(),
+            sampler.random_signed()
+        );
+        const double norm2 = candidate.squaredNorm();
+        if (norm2 > 1e-12 && norm2 <= 1.0) {
+            return candidate.normalized();
+        }
+    }
+}
+
 
 struct Ray {
 public:
-    Ray(Vector4d o_, Vector4d d_, double t_max=std::numeric_limits<double>::infinity()) :
+    Ray(const Vector4d& o_, const Vector4d& d_, double t_max=std::numeric_limits<double>::infinity()) :
         o(o_), d(d_.normalized()), t_min(1e-4), t_max(t_max) {}
     Vector4d o, d;  // origin & direction
     double t_min, t_max;  // max/min distance for hit test
@@ -74,8 +91,8 @@ enum Refl_t { DIFF, SPEC, REFR };  // material types, used in radiance()
 
 class Sphere {
 public:
-    Sphere(double radius, Vector4d center, Array3d emission, Array3d colour, Refl_t refl):
-         radius(radius), center(center), emission(emission), colour(colour), refl(refl) {}
+    Sphere(double radius, const Vector4d& center, const Array3d& emission, const Array3d& colour, Refl_t refl):
+         center(center), emission(emission), colour(colour), refl(refl), radius(radius) {}
     
     double intersect(const Ray& ray) const{
         Vector4d oc = center - ray.o;
@@ -99,85 +116,106 @@ public:
 
 
 // find hit object closest to the screen by iterating over all objects; very inefficient!
-inline Sphere const *hit(const std::vector<Sphere> &scene, Ray &r, double &t) {
-    Sphere const *hitobj = 0;
+inline const Sphere* hit(const std::vector<Sphere>& scene, const Ray& r, double& t) {
+    const Sphere* hitobj = nullptr;
     t = r.t_max;
-    for (std::vector<Sphere>::const_iterator i = scene.begin(); i != scene.end() ; ++i) {
-        double tt = (*i).intersect(r);
+    for (const Sphere& sphere : scene) {
+        const double tt = sphere.intersect(r);
         if (tt > 0 && tt < t) {
             t = tt;
-            hitobj = &(*i);
+            hitobj = &sphere;
         }
     }
     return hitobj;
 }
 
 // Gram-Schmidt orthogonalisation
-inline Vector4d gs(Vector4d v, Vector4d orth) {
+inline Vector4d gs(const Vector4d& v, const Vector4d& orth) {
 	return(v - v.dot(orth)*orth).normalized();
 }
 
 class PathTracer {
 public:
-    PathTracer() {}
-    Array3d radiance(const std::vector<Sphere> &scene, Ray &r, int depth, Sampling &sampler, const Configuration& configuration, int E=1) const{
-        double t=0;
-        Sphere const *hitobj =  hit(scene, r, t);
+    Array3d radiance(
+        const std::vector<Sphere>& scene,
+        const Ray& r,
+        int depth,
+        Sampling& sampler,
+        const Configuration& configuration,
+        int E = 1
+    ) const {
+        double t = 0;
+        const Sphere* hitobj = hit(scene, r, t);
         // return the background if nothing is hit
         if(!hitobj){
-            double alpha = 0.5 * (r.d[1] + 1.0);
+            const double alpha = 0.5 * (r.d[1] + 1.0);
             return configuration.env_map*(Array3d(1.0,1.0,1.0) * (1-alpha) + Array3d(0.5, 0.7, 1.0) * alpha);
         }
         
         // something is hit
-        Vector4d hitpos=r.o + t * r.d;
-        Vector4d normal=(hitpos-(*hitobj).center).normalized();
-        Vector4d nl=normal.dot(r.d)<0 ? normal : -normal;
+        const Vector4d hitpos = r.o + t * r.d;
+        const Vector4d normal = (hitpos - hitobj->center).normalized();
+        const Vector4d nl = normal.dot(r.d) < 0 ? normal : -normal;
         Array3d f = (*hitobj).colour;
-        double p = f.maxCoeff();
+        const double p = f.maxCoeff();
         
-        if (++depth>configuration.min_bounce || !p){
+        ++depth;
+        if (depth > configuration.min_bounce || !p){
             if (sampler.random_double()<p) f=f/p; else return E*(*hitobj).emission;
         }
-        if ((*hitobj).refl == DIFF){
-            Vector4d d = Vector4d::Random().normalized();
-            if(d.dot(nl)<0) d = -d;
-            Ray newray(hitpos, d); // diffuse reflection
-            Array3d e(0,0,0); // emitter samling colour
-            if(configuration.emitter_sampling_off == 0){
+        if (hitobj->refl == DIFF){
+            Vector4d d = random_unit_vector(sampler);
+            if(d.dot(nl) < 0) {
+                d = -d;
+            }
+            const Ray newray(hitpos, d); // diffuse reflection
+            Array3d e(0, 0, 0); // emitter samling colour
+            if (configuration.emitter_sampling_off == 0) {
                 // emitter sampling
-                for (std::vector<Sphere>::const_iterator light = scene.begin(); light != scene.end() ; ++light) {
-                    if ((*light).emission.maxCoeff()<=0) continue; // skip non-lights
-					Vector4d tt = (*light).center - hitpos;
-					double cos_a_max = sqrt(1 - (*light).radius * (*light).radius / tt.squaredNorm());
-					Vector4d su = Vector4d::Random().normalized();  // TODO: fix this biased sampling
-					Vector4d l = (tt + su * (*light).radius*sampler.random_double()).normalized();
-					Ray lr = Ray(hitpos, l);
-                    double d=0;
-                    Sphere const *closest = hit(scene,lr,d);
-                    if(closest == &(*light) && l.dot(nl) > 0){
-                        e += f * ((*light).emission * l.dot(nl)*2*(1-cos_a_max));
+                for (const Sphere& light : scene) {
+                    if (light.emission.maxCoeff() <= 0) {
+                        continue; // skip non-lights
+                    }
+                    const Vector4d tt = light.center - hitpos;
+                    const double cos_a_max = std::sqrt(1 - light.radius * light.radius / tt.squaredNorm());
+                    const Vector4d su = random_unit_vector(sampler);  // TODO: fix this biased sampling
+                    const Vector4d l = (tt + su * light.radius * sampler.random_double()).normalized();
+                    const Ray lr(hitpos, l);
+                    double light_t = 0;
+                    const Sphere* closest = hit(scene, lr, light_t);
+                    if (closest == &light && l.dot(nl) > 0) {
+                        e += f * (light.emission * l.dot(nl) * 2 * (1 - cos_a_max));
                     }
                 }
             }
             // bounce
             return e+E*(*hitobj).emission + f * radiance(scene, newray, depth, sampler, configuration, configuration.emitter_sampling_off);
-        }else if ((*hitobj).refl == SPEC) {
-            Ray newray(hitpos,r.d-2*normal.dot(r.d)*normal);
+        }else if (hitobj->refl == SPEC) {
+            const Ray newray(hitpos,r.d-2*normal.dot(r.d)*normal);
             return (*hitobj).emission + f * radiance(scene, newray, depth, sampler, configuration);
-        }else if ((*hitobj).refl == REFR) {
-            Ray reflRay(hitpos, r.d-2*normal.dot(r.d)*normal);
-            bool into = normal.dot(nl)>0;                // Ray from outside going in?
-            double nc=1, nt=1.5, nnt=into ? nc/nt : nt/nc, ddn=r.d.dot(nl);
-            double cos2t=1-nnt*nnt*(1-ddn*ddn);
+        }else if (hitobj->refl == REFR) {
+            const Ray reflRay(hitpos, r.d-2*normal.dot(r.d)*normal);
+            const bool into = normal.dot(nl)>0;                // Ray from outside going in?
+            const double nc=1;
+            const double nt=1.5;
+            const double nnt=into ? nc/nt : nt/nc;
+            const double ddn=r.d.dot(nl);
+            const double cos2t=1-nnt*nnt*(1-ddn*ddn);
             if (cos2t<0){    // Total internal reflection
                 return (*hitobj).emission + f * radiance(scene,reflRay,depth,sampler,configuration);
             }
-            Vector4d tdir = (r.d*nnt - normal*((into?1:-1)*(ddn*nnt+sqrt(cos2t)))).normalized();
-            double a=nt-nc, b=nt+nc, R0=a*a/(b*b), c = 1-(into?-ddn:tdir.dot(normal));
-            double Re=R0+(1-R0)*c*c*c*c*c,Tr=1-Re,P=.25+.5*Re,RP=Re/P,TP=Tr/(1-P);
+            const Vector4d tdir = (r.d*nnt - normal*((into?1:-1)*(ddn*nnt+std::sqrt(cos2t)))).normalized();
+            const double a=nt-nc;
+            const double b=nt+nc;
+            const double R0=a*a/(b*b);
+            const double c = 1-(into?-ddn:tdir.dot(normal));
+            const double Re=R0+(1-R0)*c*c*c*c*c;
+            const double Tr=1-Re;
+            const double P=.25+.5*Re;
+            const double RP=Re/P;
+            const double TP=Tr/(1-P);
             Array3d e = (*hitobj).emission;
-            Ray tRay(hitpos,tdir);
+            const Ray tRay(hitpos,tdir);
             if(depth>2){
                 if(sampler.random_double()<P){
                     e += f * radiance(scene,reflRay,depth,sampler,configuration)*RP;
@@ -193,43 +231,9 @@ public:
         return Array3d::Zero();
     }
 };
-
-
-
-// print progress bar
-class ProgressBar{
-public:
-    ProgressBar(int size, int max_ticks): size(size),max_ticks(max_ticks),current(0){}
-    
-    void end() const { std::cout<<std::endl; }
-    void print() {
-        std::lock_guard<std::mutex> guard(tick_mutex);
-        int pos = size * (float)current/max_ticks;
-        std::cout << "[";
-        for (int i = 0; i < size; i++) {
-            if (i < pos) std::cout << "=";
-            else if (i == pos) std::cout << ">";
-            else std::cout << ".";
-        }
-        std::cout << "] " << (int((float)current / max_ticks * 100.0)) << " %" << std::endl;
-        std::cout.flush();
-    }
-    
-    void tick() {
-        std::lock_guard<std::mutex> guard(tick_mutex);
-        if(current < max_ticks) current++;
-    }
-    
-private:
-    unsigned size;
-    unsigned max_ticks;
-    unsigned current;
-    std::mutex tick_mutex;
-};
-
 // utility
 inline double clamp(double x){ return x<0 ? 0 : x>1 ? 1 : x; }
-inline uint8_t toInt(double x){ return uint8_t(pow(clamp(x),1/2.2)*255+.5); }
+inline uint8_t toInt(double x){ return static_cast<uint8_t>(std::pow(clamp(x),1/2.2)*255+.5); }
 
 // for writing png
 struct RGBs{
@@ -238,47 +242,109 @@ struct RGBs{
     uint8_t r,g,b;
 };
 
+static_assert(sizeof(RGBs) == 3, "RGB pixel must be tightly packed.");
+
+inline std::string make_frame_filename(char eye, int frame_index) {
+    std::ostringstream ss;
+    ss << "output_" << eye << "_"
+       << std::setfill('0') << std::setw(3) << std::right
+       << frame_index << ".png";
+    return ss.str();
+}
+
+constexpr double kOpenClSceneScale = 1.0;
+
+inline OpenClFloat4 to_opencl_float4(const Vector4d& v) {
+    return OpenClFloat4{
+        static_cast<double>(v[0] * kOpenClSceneScale),
+        static_cast<double>(v[1] * kOpenClSceneScale),
+        static_cast<double>(v[2] * kOpenClSceneScale),
+        static_cast<double>(v[3] * kOpenClSceneScale)
+    };
+}
+
+inline OpenClFloat4 to_opencl_rgb(const Array3d& c) {
+    return OpenClFloat4{
+        static_cast<double>(c[0]),
+        static_cast<double>(c[1]),
+        static_cast<double>(c[2]),
+        0.0
+    };
+}
+
+OpenClCamera to_opencl_camera(const Camera& cam) {
+    OpenClCamera out{};
+    out.origin = to_opencl_float4(cam.origin);
+    out.corner = to_opencl_float4(cam.upper_left_corner);
+    out.u = to_opencl_float4(cam.u);
+    out.v = to_opencl_float4(cam.v);
+    return out;
+}
+
+std::vector<OpenClSphere> to_opencl_scene(const std::vector<Sphere>& scene) {
+    std::vector<OpenClSphere> out;
+    out.reserve(scene.size());
+    for (const Sphere& sp : scene) {
+        out.push_back(OpenClSphere{
+            to_opencl_float4(sp.center),
+            to_opencl_rgb(sp.emission),
+            to_opencl_rgb(sp.colour),
+            static_cast<int>(sp.refl),
+            static_cast<double>(sp.radius * kOpenClSceneScale)
+        });
+    }
+    return out;
+}
+
 // rendering
-void render(Configuration& configuration, Camera& cam, std::vector<Sphere>& scene){
-    ProgressBar pb(50, configuration.height/10);
-    MatrixXd R(configuration.width, configuration.height);
-    MatrixXd G(configuration.width, configuration.height);
-    MatrixXd B(configuration.width, configuration.height);
-    std::unique_ptr<PathTracer> integrator(new PathTracer);
+void render_cpu(const Configuration& configuration, const Camera& cam, const std::vector<Sphere>& scene){
+    const int width = configuration.width;
+    const int height = configuration.height;
+    const int sample_count = configuration.number_of_samples;
+    const unsigned progress_step = static_cast<unsigned>(std::max(1, height / 10));
+    const unsigned progress_ticks = static_cast<unsigned>((height + static_cast<int>(progress_step) - 1) / static_cast<int>(progress_step));
+
+    ProgressBar pb(50, progress_ticks);
+    std::vector<RGBs> bitmap(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    PathTracer integrator;
+    const double inv_width = 1.0 / static_cast<double>(width);
+    const double inv_height = 1.0 / static_cast<double>(height);
+    const double sample_weight = 1.0 / static_cast<double>(sample_count);
     
 #pragma omp parallel for schedule(dynamic, 1)    // OpenMP
     for(int y=0; y<configuration.height; y++){
-        Sampling sampler(y*y*y);
-        for (unsigned short x=0; x<configuration.width; x++){
+        Sampling sampler((y + 1) * (y + 1) * (y + 1));
+        for (int x=0; x<width; ++x){
             Array3d col(0,0,0); // initial colour of pixel
-            for (int s=0; s<configuration.number_of_samples; s++)
+            for (int s=0; s<sample_count; ++s)
             {
-                double u = (x + sampler.random_double()) / configuration.width;
-                double v = (y + sampler.random_double()) / configuration.height;
-                Ray ray = cam.get_ray(u, v);
-                col = col + integrator->radiance(scene,ray,0,sampler,configuration)*(1./configuration.number_of_samples);
+                const double u = (x + sampler.random_double()) * inv_width;
+                const double v = (y + sampler.random_double()) * inv_height;
+                const Ray ray = cam.get_ray(u, v);
+                col += integrator.radiance(scene, ray, 0, sampler, configuration) * sample_weight;
             }
-            R(x,y) = clamp(col[0]);
-            G(x,y) = clamp(col[1]);
-            B(x,y) = clamp(col[2]);
-            
+
+            const std::size_t index =
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(width)
+                + static_cast<std::size_t>(x);
+            bitmap[index] = RGBs(toInt(col[0]), toInt(col[1]), toInt(col[2]));
         }
 		// progress bar
-		if (y % 10 == 0) {
+		if ((y % static_cast<int>(progress_step)) == 0) {
 			pb.tick();
 			pb.print();
 		}
     }
-    std::cout<<"\n";
+    pb.end();
     
-    // write image to file
-    std::vector<RGBs> bitmap(configuration.width * configuration.height);
-    for(int y = 0 ; y < configuration.height ; ++y)
-    {
-        for (int x=0; x<configuration.width; ++x)
-            bitmap[y * configuration.width + x] = RGBs(toInt(R(x,y)), toInt(G(x,y)), toInt(B(x,y)));
+    if (!simple_png::write_png_rgb8(
+            configuration.output,
+            width,
+            height,
+            reinterpret_cast<const uint8_t*>(bitmap.data()),
+            3 * width)) {
+        std::cerr << "Failed to write image: " << configuration.output << std::endl;
     }
-    stbi_write_png(configuration.output.c_str(), configuration.width, configuration.height, 3, bitmap.data(), 3 * configuration.width);
 }
 
 // entry point
@@ -286,7 +352,7 @@ int main(int argc, char *argv[]){
     
     int opt;
 	Configuration configuration;
-    while((opt=getopt(argc,argv,"m:s:w:h:f:"))!=-1){
+    while((opt=getopt(argc,argv,"m:s:w:h:f:g"))!=-1){
         switch(opt){
             case 'm':  // minimum number of bouncing
                 configuration.min_bounce = atoi(optarg);
@@ -300,9 +366,12 @@ int main(int argc, char *argv[]){
             case 'h':  // height
                 configuration.height = atoi(optarg);
                 break;
-			case 'f':  // number of frames
-				configuration.frames = atoi(optarg);
-				break;
+				case 'f':  // number of frames
+					configuration.frames = atoi(optarg);
+					break;
+            case 'g':  // use GPU backend when available
+                configuration.use_gpu = true;
+                break;
 			case ':':
                 std::cout << opt << " needs arguments"<< std::endl;
                 break;
@@ -311,78 +380,110 @@ int main(int argc, char *argv[]){
                 break;
         }
     }
-    
 
-////////////// modify below /////////////    
-// scene construction
-    std::vector<Sphere> scene;
-    scene.clear();
-    scene.reserve(1000);
-    scene.push_back(Sphere(1e5, Vector4d(-1e5-175,0,0,0), Array3d::Zero(),Array3d(.75,.25,.25),SPEC)); //Left wall
-    scene.push_back(Sphere(1e5, Vector4d(1e5+175,0,0,0),  Array3d::Zero(),Array3d(.25,.25,.75),SPEC));//Right wall
-    scene.push_back(Sphere(1e5, Vector4d(0,0, 1e5-175,0),      Array3d::Zero(),Array3d(.25,.75,.25),SPEC));//Back wall
-    scene.push_back(Sphere(1e5, Vector4d(0,0,-1e5+200,0),  Array3d::Zero(),Array3d(.75,.75,.75),  SPEC));//Frnt wall
-    scene.push_back(Sphere(1e5, Vector4d(0, -1e5-175,0,0),    Array3d(1,1,1),Array3d(.35,.75,.55),SPEC));//floor light
-//    scene.push_back(Sphere(1e5, Vector4d(0,-1e5-175,0,0),     Array3d(0,0,0),Array3d(.35,.75,.55),SPEC));//floor
-    scene.push_back(Sphere(1e5, Vector4d(0, 1e5+175,0,0),    Array3d(0,0,0),Array3d(.35,.25,.55),SPEC));//ceiling
-    scene.push_back(Sphere(1e5, Vector4d(0,0,0,175+1e5),     Array3d::Zero(),Array3d(.35,.55,.75),SPEC));// w+
-    scene.push_back(Sphere(1e5, Vector4d(0,0,0,-175-1e5),     Array3d::Zero(),Array3d(.75,.55,.35),SPEC));// w-
-        // objects
-	int m = 2;
-    for(int i=-m; i<=m; i++){
-        for(int j=-m; j<=m; j++){
-            for(int k=-m; k<=m; k++){
-                for(int l=-m; l<=m; l++){
-					switch(abs(i+j+k+l) % 3){
-						case 0:
-							scene.push_back(Sphere(10, Vector4d(i*75/m, j* 75 / m, k* 75 / m, l* 75 / m), Array3d(.50+.2*i/m, .50+.2*j/m, .50+.2*l/m),Array3d(.50+.2*i/m, .50+.2*j/m, .50+.2*l/m), DIFF));
-							break;
-						case 1:
-							scene.push_back(Sphere(10, Vector4d(i * 75 / m, j * 75 / m, k * 75 / m, l * 75 / m), Array3d::Zero(), Array3d(.50 + .2*i / m, .50 + .2*j / m, .50 + .2*l / m), SPEC));
-							break;
-						case 2:
-							scene.push_back(Sphere(10, Vector4d(i * 75 / m, j * 75 / m, k * 75 / m, l * 75 / m), Array3d::Zero(), Array3d(.50 + .2*i / m, .50 + .2*j / m, .50 + .2*l / m), REFR));
-							break;
-					}
-                }
-            }
-        }
+    if (configuration.width <= 0 || configuration.height <= 0 || configuration.frames <= 0 ||
+        configuration.number_of_samples <= 0 || configuration.min_bounce < 0) {
+        std::cerr << "Invalid render configuration. "
+                  << "Expected positive width/height/frames/samples and min_bounce >= 0." << std::endl;
+        return 1;
     }
-//        Sphere(16.5,Vector4d(50,20.0,80,0),       Array3d::Zero(),Array3d(1,1,1)*.999, REFR),// glass ball
-//    scene.push_back(Sphere(16.5,Vector4d(23,-10,90,5),       Array3d::Zero(),Array3d(1,1,1)*.999, SPEC));// mirror ball
-//        Sphere(16.5,Vector4d(80,16.5,100,10),       Array3d::Zero(),Array3d(.8,.25,0), DIFF), //red ball
-//        Sphere(600, Vector4d(50,681.6-.27,81.6,0), Array3d(1,1,1)*12,  Array3d::Zero(), DIFF) //ceiling light
     
 
-    // 2D screen axis
-    Vector4d v = Vector4d(0, -1, 0.01, 0.02);
+    const std::vector<SceneSphere> scene_def = build_default_scene();
+    std::vector<Sphere> scene;
+    scene.reserve(scene_def.size());
+    for (const SceneSphere& sp : scene_def) {
+        scene.emplace_back(
+            sp.radius,
+            sp.center,
+            sp.emission,
+            sp.colour,
+            static_cast<Refl_t>(sp.refl)
+        );
+    }
+    
 
-	// render images for both eyes
-    for(int i=0;i<configuration.frames;i++){
-        double theta = 0.5*M_PI*i*2.0/configuration.frames;
-		Vector4d origin(100*sin(theta), 100-200.0*i/configuration.frames, 190,  100*cos(theta));
-		Vector4d eye_vect(4*cos(theta/3),4*sin(theta/3),0,0);
+	    // 2D screen axis
+	    Vector4d v = Vector4d(0, -1, 0.01, 0.02);
+
+    const std::vector<OpenClSphere> opencl_scene =
+        configuration.use_gpu ? to_opencl_scene(scene) : std::vector<OpenClSphere>();
+
+		// render images for both eyes
+	    bool warned_gpu_fallback = false;
+	    for(int i=0;i<configuration.frames;i++){
+        const double theta = M_PI * static_cast<double>(i) / static_cast<double>(configuration.frames);
+		const Vector4d origin(100*std::sin(theta), 100-200.0*i/configuration.frames, 190,  100*std::cos(theta));
+		Vector4d eye_vect(4*std::cos(theta/3),4*std::sin(theta/3),0,0);
         eye_vect = gs(eye_vect,origin.normalized());
 //        std::cout << origin << std::endl << eye_vect << std::endl;
     	// left eye
-		Vector4d left_rel((-(origin+eye_vect).normalized()));
-		Vector4d left_u = gs(eye_vect,left_rel);
-		Vector4d left_v = gs(gs(v,left_rel),left_u);
+		const Vector4d left_rel((-(origin+eye_vect).normalized()));
+		const Vector4d left_u = gs(eye_vect,left_rel);
+		const Vector4d left_v = gs(gs(v,left_rel),left_u);
         Camera cam = Camera(origin+eye_vect, left_rel, left_u,left_v);
-        std::stringstream ss;
-        ss << "output_L_" << std::setfill('0') << std::setw(3) << std::right << std::to_string(i) << ".png";
-        ss >> configuration.output;
-        std::cout << configuration.output << std::endl;
-        render(configuration, cam, scene);
+        configuration.output = make_frame_filename('L', i);
+	        std::cout << configuration.output << std::endl;
+	        bool rendered = false;
+	        if (configuration.use_gpu) {
+            rendered = render_opencl_image(
+                configuration.output,
+                configuration.width,
+                configuration.height,
+                configuration.number_of_samples,
+                configuration.min_bounce,
+                static_cast<double>(configuration.env_map),
+                2 * i,
+                to_opencl_camera(cam),
+                opencl_scene,
+                50
+            );
+	            if (!rendered && !warned_gpu_fallback) {
+#if defined(SMALLPT4D_WITH_OPENCL)
+	                std::cerr << "GPU render failed. Falling back to CPU." << std::endl;
+#else
+	                std::cerr << "GPU backend requested but OpenCL is not enabled in this build. Using CPU." << std::endl;
+#endif
+	                warned_gpu_fallback = true;
+	            }
+	        }
+	        if (!rendered) {
+	            render_cpu(configuration, cam, scene);
+	        }
     	// right eye
-		Vector4d right_rel((-(origin-eye_vect).normalized()));
-		Vector4d right_u = gs(eye_vect,right_rel);
-		Vector4d right_v = gs(gs(v,right_rel),right_u);
+		const Vector4d right_rel((-(origin-eye_vect).normalized()));
+		const Vector4d right_u = gs(eye_vect,right_rel);
+		const Vector4d right_v = gs(gs(v,right_rel),right_u);
         cam = Camera(origin-eye_vect, right_rel, right_u,right_v);
-		std::stringstream ssr;
-		ssr << "output_R_" << std::setfill('0') << std::setw(3) << std::right << std::to_string(i) << ".png";
-        ssr >> configuration.output;
-        std::cout << configuration.output << std::endl;
-        render(configuration, cam, scene);
+        configuration.output = make_frame_filename('R', i);
+	        std::cout << configuration.output << std::endl;
+	        rendered = false;
+	        if (configuration.use_gpu) {
+            rendered = render_opencl_image(
+                configuration.output,
+                configuration.width,
+                configuration.height,
+                configuration.number_of_samples,
+                configuration.min_bounce,
+                static_cast<double>(configuration.env_map),
+                2 * i + 1,
+                to_opencl_camera(cam),
+                opencl_scene,
+                50
+            );
+	            if (!rendered && !warned_gpu_fallback) {
+#if defined(SMALLPT4D_WITH_OPENCL)
+	                std::cerr << "GPU render failed. Falling back to CPU." << std::endl;
+#else
+                std::cerr << "GPU backend requested but OpenCL is not enabled in this build. Using CPU." << std::endl;
+#endif
+                warned_gpu_fallback = true;
+            }
+	        }
+	        if (!rendered) {
+	            render_cpu(configuration, cam, scene);
+	        }
     }
+
+    return 0;
 }
