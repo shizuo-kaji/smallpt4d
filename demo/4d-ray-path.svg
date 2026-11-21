@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="397" viewBox="0 0 900 397" role="img" aria-labelledby="title desc">
+  <title id="title">A reflection leaves the space of primary rays</title>
+  <desc id="desc">The grid represents the three-dimensional space spanned by the eye and its film. One film dimension is suppressed. A primary ray crosses the film, hits a mirrored hypersphere, and reflects toward an emitter outside that space. Arrows follow the tracing direction from eye to emitter.</desc>
+  <defs>
+    <linearGradient id="sheet" x1="0" y1="1" x2="1" y2="0" gradientUnits="objectBoundingBox">
+      <stop stop-color="#203b43"/>
+      <stop offset="1" stop-color="#192930"/>
+    </linearGradient>
+    <pattern id="grid" width="58" height="29" patternUnits="userSpaceOnUse" patternTransform="skewX(-42)">
+      <path d="M0 29V0h58" fill="none" stroke="#476269" stroke-width="1"/>
+    </pattern>
+    <clipPath id="sheetClip"><path d="M26 338h663l149-151H175z"/></clipPath>
+    <radialGradient id="mirror" cx="29%" cy="20%" r="87%">
+      <stop stop-color="#cfc8ee"/>
+      <stop offset=".38" stop-color="#a79bd0"/>
+      <stop offset=".7" stop-color="#776a9f"/>
+      <stop offset="1" stop-color="#39334e"/>
+    </radialGradient>
+    <marker id="normalTip" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0l9 4.5L0 9z" fill="#ddcbff"/>
+    </marker>
+    <style>
+      text { font-family: "Segoe UI",Arial,sans-serif; fill: #eff4f9; font-size: 18px; }
+      .heading { font-size: 24px; font-weight: 600; }
+      .note { fill: #b9c8d2; font-size: 16px; }
+      .leader { stroke: #98a8b7; stroke-width: 1.4; fill: none; }
+    </style>
+  </defs>
+  <rect x=".5" y=".5" width="899" height="396" rx="15" fill="#151923" stroke="#454855"/>
+  <text class="heading" x="26" y="44">Tracing a ray from the eye</text>
+
+  <!-- Suppress one film axis. The primary-ray three-flat projects to this grid;
+       the two-dimensional film projects to a line within it. -->
+  <path d="M26 338h663l149-151H175z" fill="url(#sheet)" stroke="#50656d"/>
+  <g clip-path="url(#sheetClip)">
+    <rect x="24" y="185" width="816" height="156" fill="url(#grid)"/>
+    <path d="M127 257L630 179.6v199.1z" fill="#7be1ce" opacity=".045"/>
+    <path d="M630 179.6L127 257l503 121.7" stroke="#77b4ae" fill="none" stroke-dasharray="4 6"/>
+  </g>
+
+  <!-- The hypersphere is drawn as a sphere icon. The outward normal at the
+       hit bisects the outgoing direction and the reversed incident direction. -->
+  <circle cx="601" cy="299" r="59.397" fill="url(#mirror)" stroke="#d7ccef" stroke-width="1.4"/>
+  <g fill="none" stroke="#e6dcff" stroke-opacity=".44">
+    <ellipse cx="601" cy="299" rx="59" ry="17" transform="rotate(-15 601 299)"/>
+    <ellipse cx="601" cy="299" rx="22" ry="59" transform="rotate(25 601 299)"/>
+  </g>
+
+  <path d="M251 287l58-58" stroke="#19232b" stroke-width="9" stroke-linecap="round"/>
+  <path d="M251 287l58-58" stroke="#d5f7fc" stroke-width="5" stroke-linecap="round"/>
+  <path d="M127 257h432" stroke="#71e3d2" stroke-width="3.5"/>
+  <path d="M457 249l17 8-17 8z" fill="#71e3d2"/>
+  <path d="M559 257V64" stroke="#ffb862" stroke-width="3.6"/>
+  <path d="M551 155l8-17 8 17z" fill="#ffb862"/>
+  <path d="M559 257l-45-45" stroke="#ddcbff" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#normalTip)"/>
+  <circle cx="559" cy="257" r="5" fill="#fff" stroke="#31263b" stroke-width="1.5"/>
+  <circle cx="281" cy="257" r="4" fill="#e2fffb" stroke="#223538" stroke-width="1.4"/>
+  <circle cx="127" cy="257" r="6" fill="#71e3d2" stroke="#e1fffa" stroke-width="2"/>
+
+  <circle cx="559" cy="64" r="25" fill="#ffb65e" fill-opacity=".1"/>
+  <circle cx="559" cy="64" r="18" fill="#ffb65e" fill-opacity=".2"/>
+  <circle cx="559" cy="64" r="11" fill="#ffcc83" stroke="#fff0bf" stroke-width="2"/>
+  <text x="599" y="61">Emitter</text>
+  <text class="note" x="599" y="83">Outside the space of primary rays</text>
+
+  <text x="580" y="150" style="fill:#ffd398">Reflected ray</text>
+  <text x="520" y="181" text-anchor="end" style="fill:#ddcbff">4D normal</text>
+
+  <text x="77" y="224">Eye</text>
+  <path class="leader" d="M113 230l11 18"/>
+  <text x="243" y="165">2D film, edge-on</text>
+  <path class="leader" d="M298 176v31l8 14"/>
+  <text x="362" y="291" style="fill:#a6ffed">Primary ray</text>
+  <text x="703" y="293">Mirrored hypersphere</text>
+  <path class="leader" d="M694 288h-19l-10 8"/>
+
+  <text class="note" x="27" y="378">The grid represents the 3D space spanned by the eye and film.</text>
+</svg>

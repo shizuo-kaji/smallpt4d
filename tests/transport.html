@@ -1,0 +1,137 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>4D light transport regression</title>
+<h1>4D light transport regression</h1>
+<pre id="report">Running…</pre>
+<canvas id="probe" width="65" height="65"></canvas>
+<script type="module">
+import { cameraFrame, SCENES } from '../docs/optics.js';
+import { createRenderer } from '../docs/renderer.js';
+
+// Exercise the shipped geometry, camera frame and fragment programs.
+const canvas = document.getElementById('probe');
+const report = document.getElementById('report');
+const transform = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,4.9,1]);
+const f = 1 / Math.tan(39 * Math.PI / 360);
+const projection = new Float32Array([f,0,0,0, 0,f,0,0, 0,0,-1.001,-1, 0,0,-.1,0]);
+const viewport = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+const state = { scene: 'mirror', w: 0, plane: 'xw', angle: 0, bounces: 0, lightOn: true };
+const dot = (a, b) => a.reduce((sum, x, i) => sum + x*b[i], 0);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+
+function checkEmitterGeometry(scene) {
+  const emitter = SCENES[scene].find(s => s.witness);
+  const {origin, right, up, back} = cameraFrame(transform, state);
+  const d = emitter.center.map((x, i) => x - origin[i]);
+  const normalDistance2 = dot(d,d) - [right,up,back].reduce((sum, axis) => sum + dot(d,axis)**2, 0);
+  check(normalDistance2 > emitter.radius**2, scene + ': emitter intersects the primary-ray space');
+}
+
+try {
+  const renderer = createRenderer(canvas);
+  const { gl } = renderer;
+  function render(scene, bounces, lightOn, camera = {}, eye = transform) {
+    renderer.draw({ viewport, projection, transform: eye, state: { ...state, ...camera, scene, bounces, lightOn } });
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    check(gl.getError() === gl.NO_ERROR, 'WebGL readback failed');
+    return pixels;
+  }
+  // The first two linear RGB differences were measured with cpp/main.cpp. The
+  // remaining fixtures have exact paths with known material transmittances.
+  // Taking the difference cancels the studio environment in each case.
+  const references = [
+    ['mirror', 1, [4.45, 1.0672, .1584]],
+    ['glass', 2, [4.24562, 1.03485, .146534]],
+    ['relay', 2, [5 * .89 * .75, 1.16 * .92 * .91, .16 * .99 * .94]],
+    ['cell24', 1, [4.45, 1.0672, .1584]],
+    ['tir', 1, [5 * .96, 1.16 * .984, .16 * .997]]
+  ];
+  function linear(byte) {
+    const mapped = (byte / 255) ** 2.2;
+    return mapped / (1 - mapped);
+  }
+  const messages = [];
+  for (const [scene, requiredBounces, expected] of references) {
+    checkEmitterGeometry(scene);
+    const center = 4 * Math.floor(canvas.width * canvas.height / 2);
+    for (let n = 0; n <= requiredBounces; n++) {
+      const on = render(scene, n, true);
+      const off = render(scene, n, false);
+      if (n === 0) check(on.every((v, i) => v === off[i]), scene + ': emitter visible without secondary rays');
+      const redChange = on[center] - off[center];
+      if (n < requiredBounces) {
+        check(Math.abs(redChange) <= 1, scene + ': light arrived too soon');
+      } else {
+        for (let channel = 0; channel < 3; channel++) {
+          const delta = linear(on[center + channel]) - linear(off[center + channel]);
+          check(Math.abs(delta - expected[channel]) < .05 * expected[channel],
+            scene + ': secondary radiance disagrees with the reference in channel ' + channel);
+        }
+      }
+      messages.push(scene + ', secondary rays ' + n + ', center red (on / off) ' + on[center] + ' / ' + off[center]);
+    }
+  }
+  const vertices = SCENES.cell24;
+  check(vertices.length === 24, '24-cell vertex count');
+  const centroid = [0, 1, 2, 3].map(k => vertices.reduce((sum, s) => sum + s.center[k], 0) / 24);
+  const vectors = vertices.map(s => s.center.map((v, k) => v - centroid[k]));
+  const radius2 = dot(vectors[0], vectors[0]);
+  for (const v of vectors) {
+    check(Math.abs(dot(v, v) - radius2) < 1e-8, '24-cell circumradius');
+    // Every vertex has eight neighbors at angle 60°, six at 90°, eight at
+    // 120°, and one antipode. This also catches coincident or omitted points.
+    const products = vectors.map(u => dot(v, u) / radius2);
+    for (const [cosine, count] of [[1, 1], [.5, 8], [0, 6], [-.5, 8], [-1, 1]]) {
+      check(products.filter(x => Math.abs(x - cosine) < 1e-8).length === count,
+        '24-cell vertex shell at cos(theta)=' + cosine);
+    }
+  }
+  for (const camera of [{ w: 1.5 }, { plane: 'zw', angle: Math.PI / 4 }]) {
+    const on = render('cell24', 0, true, camera), off = render('cell24', 0, false, camera);
+    check(on.some((v, i) => i % 4 === 0 && v - off[i] > 100),
+      '24-cell lamp did not enter direct view at ' + JSON.stringify(camera));
+  }
+  messages.push('24-cell: 24 regular vertices, lamp directly visible at W=+1.50 and ZW=45°');
+
+  // Compute incidence at the exit of the glass using the closest distance
+  // from the center to the ray. At both W positions the first reflected ray
+  // hits the same lamp; below the critical angle only its Fresnel share does.
+  const boundary = SCENES.tir[0], emitter = SCENES.tir.find(s => s.witness);
+  const center = 4 * Math.floor(canvas.width * canvas.height / 2);
+  for (const [w, expectedAngle] of [[0, 44.90], [-.30, 38.46]]) {
+    const {origin, back} = cameraFrame(transform, {...state, w});
+    const delta = boundary.center.map((x, i) => x - origin[i]);
+    check(dot(delta, delta) < boundary.radius**2, 'TIR eye must be inside glass');
+    const sin2 = (dot(delta, delta) - dot(delta, back)**2) / boundary.radius**2;
+    const degrees = Math.asin(Math.sqrt(sin2)) * 180 / Math.PI;
+    check(Math.abs(degrees - expectedAngle) < .02, 'TIR incidence angle at W=' + w);
+    const discriminant = 1 - 1.5**2 * sin2;
+    const reflectance = discriminant <= 0 ? 1 : .04 + .96 * (1 - Math.sqrt(discriminant))**5;
+    const on = render('tir', 1, true, {w}), off = render('tir', 1, false, {w});
+    const red = linear(on[center]) - linear(off[center]);
+    const measured = red / (boundary.color[0] * emitter.emission[0]);
+    check(Math.abs(measured - reflectance) < .045 * reflectance,
+      'TIR reflected power at W=' + w);
+    messages.push('TIR at W=' + w + ': ' + degrees.toFixed(2) + '°, measured reflectance ' + measured.toFixed(3));
+  }
+
+  // Both home eye positions should see a substantial lamp signal, including
+  // the headset's shorter viewing distance and slightly elevated eye height.
+  for (const [scene, bounces] of [['relay', 2], ['cell24', 1], ['tir', 1]]) {
+    for (const x of [-.064, .064]) {
+      const eye = new Float32Array(transform);
+      eye.set([x, .15, 3.8], 12);
+      const on = render(scene, bounces, true, {}, eye), off = render(scene, bounces, false, {}, eye);
+      check(on.some((v, i) => i % 4 === 0 && v - off[i] > 60),
+        scene + ': lamp signal missing at headset eye x=' + x);
+    }
+  }
+  messages.push('New scenes: witness visible from both default headset eye positions');
+  renderer.dispose();
+  report.textContent = 'PASS\n' + messages.join('\n');
+} catch (error) {
+  report.textContent = 'FAIL\n' + error.message;
+  throw error;
+}
+</script>

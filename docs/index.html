@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101117">
+  <meta name="description" content="4次元空間を進む光の反射・屈折・散乱を両眼で観察する WebXR パストレーサー。">
+  <title data-i18n="pageTitle">4D レイトレーサー · smallpt4D</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="bar-inner">
+      <div class="identity"><ui-icon name="mark"></ui-icon><span>smallpt<span class="brand-dimension">4D</span></span></div>
+      <nav aria-label="ナビゲーション" data-i18n-label="navigation">
+        <div class="language-switch" role="group" aria-label="表示言語" data-i18n-label="language">
+          <button type="button" data-language="ja" lang="ja" aria-pressed="true">日本語</button>
+          <button type="button" data-language="en" lang="en" aria-pressed="false">English</button>
+        </div>
+        <button id="help" class="text-button" aria-label="操作ガイド" title="操作ガイド" data-i18n-tooltip="help"><ui-icon name="help"></ui-icon><span data-i18n="help">操作ガイド</span></button>
+        <span class="nav-rule"></span>
+        <a class="text-button" href="https://github.com/shizuo-kaji/smallpt4d" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub"><span>GitHub</span><ui-icon name="external"></ui-icon></a>
+      </nav>
+    </div>
+  </header>
+  <main>
+    <div class="masthead">
+      <div>
+        <h1 data-i18n="heading">4D レイトレーサー</h1>
+        <p data-i18n="introduction">鏡とガラスを通して、4次元空間を進む光を観察する。</p>
+      </div>
+      <button class="vr-button" id="vr"><ui-icon name="headset"></ui-icon><span id="vr-label">VR で見る</span></button>
+    </div>
+    <div class="workspace">
+      <section class="stage panel" aria-labelledby="scene-title">
+        <div class="viewport">
+          <canvas id="scene-canvas" tabindex="0" aria-label="4次元パストレーシングの映像。ドラッグで視点を回転。左右の矢印キーでカメラを W 方向に移動。" data-i18n-label="canvasLabel"></canvas>
+          <div class="scene-heading">
+            <span class="view-label"><i></i><span data-i18n="pathTracing">4次元パストレーシング</span></span>
+            <h2 id="scene-title">鏡面</h2>
+          </div>
+          <div class="camera-tools" role="group" aria-label="視点の操作" data-i18n-label="viewControls">
+            <button class="icon-button" id="zoom-in" aria-label="拡大" title="拡大" data-i18n-tooltip="zoomIn"><ui-icon name="plus"></ui-icon></button>
+            <button class="icon-button" id="zoom-out" aria-label="縮小" title="縮小" data-i18n-tooltip="zoomOut"><ui-icon name="minus"></ui-icon></button>
+            <span></span>
+            <button class="icon-button" id="camera-reset" aria-label="基準視点に戻す" title="基準視点に戻す" data-i18n-tooltip="resetView"><ui-icon name="focus"></ui-icon></button>
+          </div>
+          <div class="scene-readout" aria-hidden="true"><span class="readout-dot"></span><span id="viewport-w">ΔW = 0.00</span></div>
+          <div id="render-error" class="render-error" role="alert" hidden></div>
+        </div>
+        <div class="stage-footer">
+          <span class="gesture-tip"><ui-icon name="orbit"></ui-icon><span class="desktop-tip" data-i18n="dragHint">ドラッグで視点を回転</span><span class="touch-tip" data-i18n="swipeHint">スワイプで視点を回転</span></span>
+          <span class="transport-status"><i></i><span data-i18n="secondaryRays">二次光線</span><b id="depth-readout">最大 5 回</b></span>
+        </div>
+      </section>
+
+      <aside class="controls panel" aria-label="シーンとカメラの操作" data-i18n-label="controls">
+        <section>
+          <h2 data-i18n="scenes">シーン</h2>
+          <div class="presets" role="group" aria-label="シーンを選択" data-i18n-label="chooseScene">
+            <button class="preset" data-scene="mirror" aria-pressed="true"><ui-icon name="mirror"></ui-icon><span>鏡面</span></button>
+            <button class="preset" data-scene="glass" aria-pressed="false"><ui-icon name="glass"></ui-icon><span>ガラス</span></button>
+            <button class="preset" data-scene="room" aria-pressed="false"><ui-icon name="room"></ui-icon><span>光の部屋</span></button>
+            <button class="preset" data-scene="relay" aria-pressed="false"><ui-icon name="relay"></ui-icon><span>二段鏡</span></button>
+            <button class="preset" data-scene="cell24" aria-pressed="false"><ui-icon name="cell24"></ui-icon><span>正24胞体</span></button>
+            <button class="preset" data-scene="tir" aria-pressed="false"><ui-icon name="tir"></ui-icon><span>全反射</span></button>
+          </div>
+        </section>
+        <section>
+          <div class="control-heading"><h2><label for="bounces" data-i18n="bounces">二次光線の追跡回数</label></h2><output id="bounce-value" for="bounces">5</output></div>
+          <input type="range" id="bounces" min="0" max="6" step="1" value="5">
+          <div class="range-ends" aria-hidden="true"><span>0</span><span>6</span></div>
+          <div class="light-row"><label for="light"><ui-icon name="light"></ui-icon><span data-i18n="orangeLight">橙色の光源</span></label><input type="checkbox" id="light" role="switch" checked></div>
+        </section>
+        <section>
+          <div class="control-heading"><h2><label for="w" data-i18n="cameraW">カメラの W 移動量</label></h2><output id="w-value" for="w">0.00</output></div>
+          <input type="range" id="w" min="-1.5" max="1.5" step="0.01" value="0">
+          <div class="range-ends" aria-hidden="true"><span>−1.50</span><span>0</span><span>+1.50</span></div>
+        </section>
+        <section>
+          <div class="control-heading"><h2><label for="angle" data-i18n="rotation">カメラの4次元回転</label></h2><output id="angle-value" for="angle">0°</output></div>
+          <div class="planes" role="group" aria-label="4次元の回転平面" data-i18n-label="rotationPlane">
+            <button data-plane="xw" aria-pressed="true">XW</button>
+            <button data-plane="yw" aria-pressed="false">YW</button>
+            <button data-plane="zw" aria-pressed="false">ZW</button>
+          </div>
+          <input type="range" id="angle" min="-180" max="180" step="1" value="0" aria-label="4次元の回転角度" data-i18n-label="rotationAngle">
+          <div class="range-ends" aria-hidden="true"><span>−180°</span><span>0°</span><span>+180°</span></div>
+        </section>
+      </aside>
+
+      <section class="experiment panel" aria-labelledby="experiment-title">
+        <div class="experiment-copy">
+          <h2 id="experiment-title">鏡だけに映る光源</h2>
+          <p id="experiment-detail">基準視点で橙色の光源を消すと、鏡の中の像が消えます。カメラから直接見えない光源を、鏡からの反射光線が捉えます。</p>
+        </div>
+        <button id="compare-light" type="button">光源を消す</button>
+      </section>
+    </div>
+    <noscript><p lang="ja">このアプリを利用するには JavaScript を有効にしてください。</p><p lang="en">Enable JavaScript to use the ray tracer.</p></noscript>
+  </main>
+  <dialog id="guide-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-heading"><h2 id="dialog-title" data-i18n="help">操作ガイド</h2><button class="icon-button" id="dialog-close" aria-label="閉じる" title="閉じる" data-i18n-tooltip="close"><ui-icon name="close"></ui-icon></button></div>
+    <p id="xr-notice" class="notice" hidden></p>
+    <h3 data-i18n="opticsHeading">鏡に映る4次元目</h3>
+    <p data-i18n="opticsExplanation">各眼から出た一次光線は、視点と2次元の撮像面が張る3次元空間を進みます。超球面で反射・屈折・散乱した光線は、この空間の外にある光源にも届きます。</p>
+    <p data-i18n="opticalExperiment">「鏡面」の基準視点で、橙色の光源を点灯して「二次光線の追跡回数」を 0 にします。次に 1 に上げると、1回の反射で光源に届き、鏡に橙色の像が現れます。</p>
+    <h3 data-i18n="browserControls">ブラウザーでの操作</h3>
+    <dl>
+      <dt data-i18n="orbitZoom">視点を回す・拡大する</dt><dd data-i18n="orbitZoomHow">ドラッグ・ホイール／ピンチ</dd>
+      <dt data-i18n="resetView">基準視点に戻す</dt><dd data-i18n="homeHow">映像内の照準ボタン</dd>
+      <dt data-i18n="keyboard">描画領域を選択中</dt><dd><span data-i18n="keyboardW">← → でカメラを W 方向へ移動</span><br><span data-i18n="keyboardLight">スペースで光源を点灯・消灯</span></dd>
+    </dl>
+    <h3 data-i18n="xrControls">VR コントローラー</h3>
+    <dl>
+      <dt data-i18n="sticks">スティック左右／上下</dt><dd data-i18n="stickHow">カメラの W 移動／4次元回転</dd>
+      <dt data-i18n="trigger">トリガー</dt><dd data-i18n="triggerHow">光源の点灯・消灯</dd>
+      <dt data-i18n="grips">左／右グリップ</dt><dd data-i18n="gripsHow">回転平面／シーンの切り替え</dd>
+    </dl>
+  </dialog>
+</body>
+</html>
